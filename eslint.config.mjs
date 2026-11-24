@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Software factory job worktrees: full checkouts of the repo.
+    ".worktrees/**",
   ]),
 ]);
 
