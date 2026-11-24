@@ -1,0 +1,290 @@
+// TechCart MVP schema. Money is always stored in minor units (e.g. cents/paise).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum Role {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+enum SellerStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum Condition {
+  NEW
+  REFURBISHED
+  USED
+}
+
+enum ListingStatus {
+  DRAFT
+  PENDING
+  ACTIVE
+  REJECTED
+  ARCHIVED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELLED
+  REFUNDED
+}
+
+enum SellerOrderStatus {
+  AWAITING_SHIPMENT
+  SHIPPED
+  DELIVERED
+  COMPLETED
+  DISPUTED
+  REFUNDED
+  CANCELLED
+}
+
+enum PayoutStatus {
+  PENDING
+  HELD
+  PAID
+  REVERSED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED_REFUND
+  RESOLVED_PARTIAL
+  RESOLVED_REJECTED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String?
+  role         Role     @default(BUYER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  seller    Seller?
+  cart      Cart?
+  orders    Order[]
+  reviews   Review[]
+  disputes  Dispute[]
+  auditLogs AuditLog[]
+}
+
+model Seller {
+  id              String       @id @default(cuid())
+  userId          String       @unique
+  user            User         @relation(fields: [userId], references: [id])
+  shopName        String
+  status          SellerStatus @default(PENDING)
+  stripeAccountId String?      @unique
+  ratingAvg       Float        @default(0)
+  ratingCount     Int          @default(0)
+  createdAt       DateTime     @default(now())
+
+  listings     Listing[]
+  sellerOrders SellerOrder[]
+}
+
+model Category {
+  id         String     @id @default(cuid())
+  parentId   String?
+  parent     Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children   Category[] @relation("CategoryTree")
+  name       String
+  slug       String     @unique
+  // JSON describing per-category attributes: [{ key, label, type, options?, filterable }]
+  specSchema Json
+
+  products Product[]
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  brand       String
+  model       String
+  title       String
+  slug        String   @unique
+  description String?
+  specs       Json
+  imageUrls   Json
+  createdAt   DateTime @default(now())
+
+  listings Listing[]
+
+  @@index([categoryId])
+  @@index([brand])
+}
+
+model Listing {
+  id             String        @id @default(cuid())
+  productId      String
+  product        Product       @relation(fields: [productId], references: [id])
+  sellerId       String
+  seller         Seller        @relation(fields: [sellerId], references: [id])
+  condition      Condition
+  priceMinor     Int
+  currency       String        @default("USD")
+  stock          Int           @default(0)
+  reservedStock  Int           @default(0)
+  warrantyMonths Int           @default(0)
+  serialNo       String?
+  status         ListingStatus @default(PENDING)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([productId, status, priceMinor])
+  @@index([sellerId])
+}
+
+model Cart {
+  id     String     @id @default(cuid())
+  userId String     @unique
+  user   User       @relation(fields: [userId], references: [id])
+  items  CartItem[]
+}
+
+model CartItem {
+  id        String  @id @default(cuid())
+  cartId    String
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id])
+  qty       Int     @default(1)
+
+  @@unique([cartId, listingId])
+}
+
+model Order {
+  id                String      @id @default(cuid())
+  buyerId           String
+  buyer             User        @relation(fields: [buyerId], references: [id])
+  status            OrderStatus @default(PENDING_PAYMENT)
+  totalMinor        Int
+  currency          String      @default("USD")
+  shippingAddress   Json
+  paymentIntentId   String?     @unique
+  reservationExpiry DateTime?
+  createdAt         DateTime    @default(now())
+
+  sellerOrders SellerOrder[]
+  payments     Payment[]
+
+  @@index([buyerId])
+}
+
+// One per seller within an order: the unit of fulfilment, payout and dispute.
+model SellerOrder {
+  id              String            @id @default(cuid())
+  orderId         String
+  order           Order             @relation(fields: [orderId], references: [id])
+  sellerId        String
+  seller          Seller            @relation(fields: [sellerId], references: [id])
+  status          SellerOrderStatus @default(AWAITING_SHIPMENT)
+  subtotalMinor   Int
+  commissionMinor Int
+  carrier         String?
+  trackingNumber  String?
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+
+  items   OrderItem[]
+  payout  Payout?
+  review  Review?
+  dispute Dispute?
+
+  @@index([sellerId, status])
+  @@index([orderId])
+}
+
+model OrderItem {
+  id                String      @id @default(cuid())
+  sellerOrderId     String
+  sellerOrder       SellerOrder @relation(fields: [sellerOrderId], references: [id])
+  listingId         String
+  listing           Listing     @relation(fields: [listingId], references: [id])
+  qty               Int
+  // Snapshots so later edits to a listing never change historical orders.
+  unitPriceMinor    Int
+  titleSnapshot     String
+  conditionSnapshot Condition
+}
+
+model Payment {
+  id              String   @id @default(cuid())
+  orderId         String
+  order           Order    @relation(fields: [orderId], references: [id])
+  stripeEventId   String   @unique // idempotency key for webhook processing
+  paymentIntentId String
+  amountMinor     Int
+  status          String
+  createdAt       DateTime @default(now())
+
+  @@index([orderId])
+}
+
+model Payout {
+  id               String       @id @default(cuid())
+  sellerOrderId    String       @unique
+  sellerOrder      SellerOrder  @relation(fields: [sellerOrderId], references: [id])
+  amountMinor      Int
+  status           PayoutStatus @default(HELD)
+  stripeTransferId String?      @unique
+  releaseAfter     DateTime?
+  createdAt        DateTime     @default(now())
+}
+
+model Review {
+  id            String      @id @default(cuid())
+  sellerOrderId String      @unique
+  sellerOrder   SellerOrder @relation(fields: [sellerOrderId], references: [id])
+  buyerId       String
+  buyer         User        @relation(fields: [buyerId], references: [id])
+  rating        Int
+  text          String?
+  createdAt     DateTime    @default(now())
+}
+
+model Dispute {
+  id            String        @id @default(cuid())
+  sellerOrderId String        @unique
+  sellerOrder   SellerOrder   @relation(fields: [sellerOrderId], references: [id])
+  openedById    String
+  openedBy      User          @relation(fields: [openedById], references: [id])
+  reason        String
+  status        DisputeStatus @default(OPEN)
+  resolution    String?
+  refundMinor   Int?
+  createdAt     DateTime      @default(now())
+  resolvedAt    DateTime?
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  actor      User     @relation(fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
